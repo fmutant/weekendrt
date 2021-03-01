@@ -24,11 +24,14 @@ fn clamp(x: f32, min: f32, max: f32) -> f32 {
 fn clampv(v: &Vec3, min: f32, max: f32) -> Vec3 {
 	Vec3::new(clamp(v.x(), min, max), clamp(v.y(), min, max), clamp(v.z(), min, max))
 }
+fn clampv_gamma(v: &Vec3, min: f32, max: f32) -> Vec3 {
+	Vec3::new(clamp(v.x().sqrt(), min, max), clamp(v.y().sqrt(), min, max), clamp(v.z().sqrt(), min, max))
+}
 
 fn write_color(clr: &Vec3, samples_count: i32) {
 	let scale: f32 = 1.0f32 / (samples_count as f32);
 	let rgb: Vec3 = *clr * scale;
-	println!("{}", clampv(&rgb, 0.0f32, 0.9999f32));
+	println!("{}", clampv_gamma(&rgb, 0.0f32, 0.9999f32));
 }
 
 #[derive(Copy, Clone)]
@@ -99,6 +102,23 @@ impl Vec3 {
 	}
 	fn length(&self) -> f32 {
 		self.length_squared().sqrt()
+	}
+	fn random() -> Vec3 {
+		Vec3 { e: [random_float(), random_float(), random_float()] }
+	}
+	fn random_range(min: f32, max: f32) -> Vec3 {
+		Vec3 { e: [random_float_min_max(min, max), random_float_min_max(min, max), random_float_min_max(min, max)] }
+	}
+	fn random_in_unit_sphere() -> Vec3 {
+		loop {
+			let p: Vec3 = Vec3::random_range(-1.0f32, 1.0f32);
+			if 1.0f32 <= p.length_squared() { continue; }
+			return p;
+		}
+	}
+	
+	fn random_unit_vector() -> Vec3 {
+		unit_vector(Vec3::random_in_unit_sphere())
 	}
 }
 
@@ -340,10 +360,14 @@ impl Camera {
 	}
 }
 
-fn ray_color(r: &Ray, world: &dyn Hittable) -> Vec3 {
+fn ray_color(r: &Ray, world: &dyn Hittable, depth: i32) -> Vec3 {
+	if depth <= 0 { return Vec3::new(0.0f32, 0.0f32, 0.0f32); }
 	let mut rec: HitRecord = HitRecord::new();
-	if world.hit(r, 0.0f32, F32_INFINITY, &mut rec) {
-		return rec.m_normal * 0.5f32 + 0.5f32;
+	if world.hit(r, 0.001f32, F32_INFINITY, &mut rec) {
+		let target: Vec3 = rec.m_point + rec.m_normal + Vec3::random_unit_vector();
+		let dir: Vec3 = target - rec.m_point;
+		let r2: Ray = Ray::new(&rec.m_point, &dir);
+		return ray_color(&r2, world, depth - 1) * 0.5f32;
 	}
 	let unit_direction: Vec3 = unit_vector(r.direction());
 	let t: f32 = 0.5f32 * (unit_direction.y() + 1.0f32);
@@ -358,6 +382,7 @@ fn main() {
 	let image_width_inv : f32 = 1.0f32 / (image_width - 1u32) as f32;
 	let image_height_inv : f32 = 1.0f32 / (image_height - 1u32) as f32;
 	let samples_count: i32 = 100;
+	let max_depth: i32 = 50;
 	
 	//world
 	let sphere0 = Box::new( Sphere::new(&Vec3::new(0.0f32, 0.0f32, -1.0f32), 0.5f32) );
@@ -383,11 +408,7 @@ fn main() {
 				let u = (i as f32 + random_float()) * image_width_inv;
 				let v = (j as f32 + random_float()) * image_height_inv;
 				let r: Ray = cam.get_ray(u, v);
-				pixel_color += ray_color(&r, &world);
-				//let direction: Vec3 = direction_origin + horizontal * u + vertical * v;
-				//let r: Ray = Ray::new(&origin, &direction);
-				//let clr: Vec3 = ray_color(&r, &world);
-				//println!("{}", clr);
+				pixel_color += ray_color(&r, &world, max_depth);
 			}
 			write_color(&pixel_color, samples_count);
 		}
