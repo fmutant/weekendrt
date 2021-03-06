@@ -1,4 +1,5 @@
 use rand::Rng;
+use std::rc::Rc;
 
 const F32_INFINITY: f32 = f32::INFINITY;
 const PI: f32 = 3.1415926535897932385f32;
@@ -33,7 +34,6 @@ fn write_color(clr: &Vec3, samples_count: i32) {
 	let rgb: Vec3 = *clr * scale;
 	println!("{}", clampv_gamma(&rgb, 0.0f32, 0.9999f32));
 }
-
 #[derive(Copy, Clone)]
 struct Vec3 {
 	e: [f32; 3]
@@ -44,21 +44,26 @@ struct Ray {
 	m_direction: Vec3,
 }
 
-#[derive(Copy, Clone)]
 struct HitRecord {
 	m_point: Vec3,
 	m_normal: Vec3,
+	m_material: Rc<dyn Material>,
 	m_t: f32,
 	m_frontface: bool,
 }
 
 trait Hittable {
-	fn hit(&self, r: &Ray, t_min: f32, t_max: f32, rec: &mut HitRecord) -> bool;
+	fn hit(&self, r: &Ray, t_min: f32, t_max: f32) -> (bool, HitRecord);
+}
+
+trait Material {
+	fn scatter(&self, r_in: &Ray, rec: &HitRecord) -> (bool, Vec3, Ray);
 }
 
 struct Sphere {
 	m_center: Vec3,
 	m_radius: f32,
+	m_material: Rc<dyn Material>,
 }
 
 type IHittable = Box<dyn Hittable>;
@@ -73,6 +78,15 @@ struct Camera {
 	m_lower_left_corner: Vec3,
 	m_horizontal: Vec3,
 	m_vertical: Vec3,
+}
+
+#[derive(Copy, Clone)]
+struct Lambertian {
+	m_albedo: Vec3
+}
+struct Metal {
+	m_albedo: Vec3,
+	m_fuzz: f32,
 }
 
 impl Vec3 {
@@ -116,9 +130,12 @@ impl Vec3 {
 			return p;
 		}
 	}
-	
 	fn random_unit_vector() -> Vec3 {
 		unit_vector(Vec3::random_in_unit_sphere())
+	}
+	fn near_zero(&self) -> bool {
+		const s: f32 = 1e-8f32;
+		self.e[0].abs() < s && self.e[1].abs() < s && self.e[2].abs() < s
 	}
 }
 
@@ -131,6 +148,9 @@ fn cross(u: &Vec3, v: &Vec3) -> Vec3 {
 		u.e[2] * v.e[0] - u.e[0] * v.e[2],
 		u.e[0] * v.e[1] - u.e[1] * v.e[0],
 	] }
+}
+fn reflect(v: &Vec3, n: &Vec3) -> Vec3 {
+	*v - *n * (2.0f32 * dot(v, n))
 }
 fn unit_vector(v: Vec3) -> Vec3 {
 	v / v.length()
@@ -262,17 +282,29 @@ impl Ray {
 }
 
 impl Sphere {
-	fn new(center: &Vec3, radius: f32) -> Sphere {
-		Sphere{ m_center: *center, m_radius: radius }
+	fn new(center: &Vec3, radius: f32, material: Box<dyn Material>) -> Sphere {
+		Sphere{ m_center: *center, m_radius: radius, m_material: Rc::from(material) }
 	}
 }
 
 impl HitRecord {
-	fn new() -> HitRecord {
+	fn new(root: f32, point: Vec3, material: &Rc<dyn Material>) -> HitRecord {
+		HitRecord {
+			m_point: point,
+			m_normal: Vec3::new(0.0f32, 0.0f32, 0.0f32),
+			m_t: root,
+			m_material: material.clone(),
+			m_frontface: false,
+		}
+	}
+	fn default() -> HitRecord {
+		static black_clr: Vec3 = Vec3{e:[0.0f32, 0.0f32, 0.0f32]};
+		static black_lambertian: Lambertian = Lambertian { m_albedo: black_clr };
 		HitRecord {
 			m_point: Vec3::new(0.0f32, 0.0f32, 0.0f32),
 			m_normal: Vec3::new(0.0f32, 0.0f32, 0.0f32),
 			m_t: 0.0f32,
+			m_material: Rc::new(black_lambertian),
 			m_frontface: false,
 		}
 	}
@@ -284,7 +316,7 @@ impl HitRecord {
 }
 
 impl Hittable for Sphere {
-	fn hit(&self, r: &Ray, t_min: f32, t_max: f32, rec: &mut HitRecord) -> bool {
+	fn hit(&self, r: &Ray, t_min: f32, t_max: f32) -> (bool, HitRecord) {
 		let oc: Vec3 = r.origin() - self.m_center;
 		let a: f32 = r.direction().length_squared();
 		let half_b: f32 = dot(&oc, &r.direction());
@@ -292,7 +324,7 @@ impl Hittable for Sphere {
 		
 		let discr: f32 = half_b * half_b - a * c;
 		if discr < 0.0f32 {
-			return false
+			return (false, HitRecord::default());
 		}
 		
 		let sqrtd: f32 = discr.sqrt();
@@ -300,15 +332,15 @@ impl Hittable for Sphere {
 		if root < t_min || t_max < root {
 			root = (-half_b + sqrtd) / a;
 			if root < t_min || t_max < root {
-				return false;
+				return (false, HitRecord::default());
 			}
 		}
 		
-		rec.m_t = root;
-		rec.m_point = r.at(rec.m_t);
-		let outward_normal: Vec3 = (rec.m_point - self.m_center) / self.m_radius;
+		let point: Vec3 = r.at(root);
+		let outward_normal: Vec3 = (point - self.m_center) / self.m_radius;
+		let mut rec = HitRecord::new(root, point, &self.m_material);
 		rec.set_face_normal(&r, &outward_normal);
-		return true;
+		return (true, rec);
 	}
 }
 
@@ -321,20 +353,21 @@ impl HittableList {
 }
 
 impl Hittable for HittableList {
-	fn hit(&self, r: &Ray, t_min: f32, t_max: f32, rec: &mut HitRecord) -> bool {
-		let mut temp_rec: HitRecord = *rec;
+	fn hit(&self, r: &Ray, t_min: f32, t_max: f32) -> (bool, HitRecord) {
+		let mut temp_rec: HitRecord = HitRecord::default();
 		let mut hit_anything: bool = false;
 		let mut closest_so_far: f32 = t_max;
 		
 		for object in &self.m_objects {
-			if object.hit(r, t_min, closest_so_far, &mut temp_rec) {
+			let results = object.hit(r, t_min, closest_so_far);
+			if results.0 {
 				hit_anything = true;
 				closest_so_far = temp_rec.m_t;
-				*rec = temp_rec;
+				temp_rec = results.1;
 			}
 		}
 		
-		hit_anything
+		(hit_anything, temp_rec)
 	}
 }
 
@@ -360,14 +393,46 @@ impl Camera {
 	}
 }
 
+impl Lambertian {
+	fn new(albedo: &Vec3) -> Lambertian {
+		Lambertian { m_albedo: *albedo }
+	}
+}
+
+impl Metal {
+	fn new(albedo: &Vec3, fuzz: f32) -> Metal {
+		Metal { m_albedo: *albedo, m_fuzz: fuzz }
+	}
+}
+
+impl Material for Lambertian {
+	fn scatter(&self, _r_in: &Ray, rec: &HitRecord) -> (bool, Vec3, Ray) {
+		let mut scatter_direction: Vec3 = rec.m_normal + Vec3::random_unit_vector();
+		if scatter_direction.near_zero() {
+			scatter_direction = rec.m_normal;
+		}
+		return (true, self.m_albedo, Ray::new(&rec.m_point, &scatter_direction));
+	}
+}
+
+impl Material for Metal {
+	fn scatter(&self, r_in: &Ray, rec: &HitRecord) -> (bool, Vec3, Ray) {
+		let reflected: Vec3 = reflect(&unit_vector(r_in.direction()), &rec.m_normal);
+		let scattered: Vec3 = reflected + Vec3::random_unit_vector() * self.m_fuzz;
+		return (0.0f32 < dot(&reflected, &rec.m_normal), self.m_albedo, Ray::new(&rec.m_point, &scattered));
+	}
+}
+
 fn ray_color(r: &Ray, world: &dyn Hittable, depth: i32) -> Vec3 {
 	if depth <= 0 { return Vec3::new(0.0f32, 0.0f32, 0.0f32); }
-	let mut rec: HitRecord = HitRecord::new();
-	if world.hit(r, 0.001f32, F32_INFINITY, &mut rec) {
-		let target: Vec3 = rec.m_point + rec.m_normal + Vec3::random_unit_vector();
-		let dir: Vec3 = target - rec.m_point;
-		let r2: Ray = Ray::new(&rec.m_point, &dir);
-		return ray_color(&r2, world, depth - 1) * 0.5f32;
+	let hit_result = world.hit(r, 0.001f32, F32_INFINITY);
+	if hit_result.0 {
+		let rec: HitRecord = hit_result.1;
+		let scatter_res = rec.m_material.scatter(&r, &rec);
+		if scatter_res.0 {
+			return scatter_res.1 * ray_color(&scatter_res.2, world, depth - 1);
+		}
+		return Vec3::new(0.0f32, 0.0f32, 0.0f32);
 	}
 	let unit_direction: Vec3 = unit_vector(r.direction());
 	let t: f32 = 0.5f32 * (unit_direction.y() + 1.0f32);
@@ -385,11 +450,19 @@ fn main() {
 	let max_depth: i32 = 50;
 	
 	//world
-	let sphere0 = Box::new( Sphere::new(&Vec3::new(0.0f32, 0.0f32, -1.0f32), 0.5f32) );
-	let sphere1 = Box::new( Sphere::new(&Vec3::new(0.0f32, -100.5f32, -1.0f32), 100.0f32) );
-	//let world: HittableList = vec![sphere0, sphere1];
+	let material_ground = Box::new(Lambertian::new(&Vec3::new(0.8f32, 0.8f32, 0.0f32)));
+	let material_center = Box::new(Lambertian::new(&Vec3::new(0.7f32, 0.3f32, 0.3f32)));
+	let material_left = Box::new(Metal::new(&Vec3::new(0.8f32, 0.8f32, 0.8f32), 0.3f32));
+	let material_right = Box::new(Metal::new(&Vec3::new(0.8f32, 0.6f32, 0.2f32), 1.0f32));
+	
+	let sphere0 = Box::new(Sphere::new(&Vec3::new( 0.0f32, -100.5f32, -1.0f32), 100.0f32, material_ground));
+	let sphere1 = Box::new(Sphere::new(&Vec3::new( 0.0f32,    0.0f32, -1.0f32),   0.5f32, material_center));
+	let sphere2 = Box::new(Sphere::new(&Vec3::new(-1.0f32,    0.0f32, -1.0f32),   0.5f32, material_left));
+	let sphere3 = Box::new(Sphere::new(&Vec3::new( 1.0f32,    0.0f32, -1.0f32),   0.5f32, material_right));
 	let mut world: HittableList = HittableList::new();
 	world.m_objects.push(sphere1);
+	world.m_objects.push(sphere2);
+	world.m_objects.push(sphere3);
 	world.m_objects.push(sphere0);
 	
 	//camera
@@ -404,7 +477,7 @@ fn main() {
 		eprint!("\rScanlines remaining: {0}", j);
 		for i in 0..image_width {
 			let mut pixel_color: Vec3 = Vec3::new(0.0f32, 0.0f32, 0.0f32);
-			for s in 0..samples_count {
+			for _s in 0..samples_count {
 				let u = (i as f32 + random_float()) * image_width_inv;
 				let v = (j as f32 + random_float()) * image_height_inv;
 				let r: Ray = cam.get_ray(u, v);
