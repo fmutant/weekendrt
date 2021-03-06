@@ -88,6 +88,9 @@ struct Metal {
 	m_albedo: Vec3,
 	m_fuzz: f32,
 }
+struct Dielectric {
+	m_ior: f32
+}
 
 impl Vec3 {
 	fn new(x: f32, y: f32, z:f32) -> Vec3 {
@@ -151,6 +154,13 @@ fn cross(u: &Vec3, v: &Vec3) -> Vec3 {
 }
 fn reflect(v: &Vec3, n: &Vec3) -> Vec3 {
 	*v - *n * (2.0f32 * dot(v, n))
+}
+fn refract(v: &Vec3, n: &Vec3, etai_over_etat: f32) -> Vec3 {
+	let uv: Vec3 = *v;
+	let cos_theta: f32 = dot(&-uv, n).min(1.0f32);
+	let r_out_perp: Vec3 = (uv + *n * cos_theta) * etai_over_etat;
+	let r_out_parallel: Vec3 = *n * -(1.0f32 - r_out_perp.length_squared()).abs().sqrt();
+	r_out_perp + r_out_parallel
 }
 fn unit_vector(v: Vec3) -> Vec3 {
 	v / v.length()
@@ -282,8 +292,8 @@ impl Ray {
 }
 
 impl Sphere {
-	fn new(center: &Vec3, radius: f32, material: Box<dyn Material>) -> Sphere {
-		Sphere{ m_center: *center, m_radius: radius, m_material: Rc::from(material) }
+	fn new(center: &Vec3, radius: f32, material: &Rc<dyn Material>) -> Sphere {
+		Sphere{ m_center: *center, m_radius: radius, m_material: material.clone() }
 	}
 }
 
@@ -405,6 +415,17 @@ impl Metal {
 	}
 }
 
+impl Dielectric {
+	fn new(index_of_refraction: f32) -> Dielectric {
+		Dielectric{ m_ior: index_of_refraction }
+	}
+	fn reflectance(cosine: f32, ref_idx: f32) -> f32 {
+		let mut r0: f32 = (1.0f32 - ref_idx) / (1.0f32 + ref_idx);
+		r0 = r0 * r0;
+		r0 + (1.0f32 - r0) * (1.0f32 - cosine).powf(5.0f32)
+	}
+}
+
 impl Material for Lambertian {
 	fn scatter(&self, _r_in: &Ray, rec: &HitRecord) -> (bool, Vec3, Ray) {
 		let mut scatter_direction: Vec3 = rec.m_normal + Vec3::random_unit_vector();
@@ -420,6 +441,23 @@ impl Material for Metal {
 		let reflected: Vec3 = reflect(&unit_vector(r_in.direction()), &rec.m_normal);
 		let scattered: Vec3 = reflected + Vec3::random_unit_vector() * self.m_fuzz;
 		return (0.0f32 < dot(&reflected, &rec.m_normal), self.m_albedo, Ray::new(&rec.m_point, &scattered));
+	}
+}
+
+impl Material for Dielectric {
+	fn scatter(&self, r_in: &Ray, rec: &HitRecord) -> (bool, Vec3, Ray) {
+		let refraction_ratio: f32 = if rec.m_frontface { 1.0f32 / self.m_ior } else { self.m_ior };
+		let unit_direction: Vec3 = unit_vector(r_in.direction());
+		let cos_theta: f32 = dot(&-unit_direction, &rec.m_normal).min(1.0f32);
+		let sin_theta: f32 = (1.0f32 - cos_theta * cos_theta).sqrt();
+		let cannot_refract: bool = 1.0f32 < refraction_ratio * sin_theta;
+		let mut direction: Vec3 = Vec3::new(0.0f32, 0.0f32, -1.0f32);
+		if cannot_refract || random_float() < Dielectric::reflectance(cos_theta, refraction_ratio) {
+			direction = reflect(&unit_direction, &rec.m_normal);
+		} else {
+			direction = refract(&unit_direction, &rec.m_normal, refraction_ratio);
+		}
+		(true, Vec3::new(1.0f32, 1.0f32, 1.0f32), Ray::new(&rec.m_point, &direction))
 	}
 }
 
@@ -451,14 +489,19 @@ fn main() {
 	
 	//world
 	let material_ground = Box::new(Lambertian::new(&Vec3::new(0.8f32, 0.8f32, 0.0f32)));
-	let material_center = Box::new(Lambertian::new(&Vec3::new(0.7f32, 0.3f32, 0.3f32)));
-	let material_left = Box::new(Metal::new(&Vec3::new(0.8f32, 0.8f32, 0.8f32), 0.3f32));
-	let material_right = Box::new(Metal::new(&Vec3::new(0.8f32, 0.6f32, 0.2f32), 1.0f32));
+	let material_center = Box::new(Lambertian::new(&Vec3::new(0.1f32, 0.2f32, 0.5f32)));
+	let material_left = Box::new(Dielectric::new(1.5f32));
+	let material_right = Box::new(Metal::new(&Vec3::new(0.8f32, 0.6f32, 0.2f32), 0.0f32));
 	
-	let sphere0 = Box::new(Sphere::new(&Vec3::new( 0.0f32, -100.5f32, -1.0f32), 100.0f32, material_ground));
-	let sphere1 = Box::new(Sphere::new(&Vec3::new( 0.0f32,    0.0f32, -1.0f32),   0.5f32, material_center));
-	let sphere2 = Box::new(Sphere::new(&Vec3::new(-1.0f32,    0.0f32, -1.0f32),   0.5f32, material_left));
-	let sphere3 = Box::new(Sphere::new(&Vec3::new( 1.0f32,    0.0f32, -1.0f32),   0.5f32, material_right));
+	let material_ground_rc = Rc::from(material_ground as Box<dyn Material>);
+	let material_center_rc = Rc::from(material_center as Box<dyn Material>);
+	let material_left_rc = Rc::from(material_left as Box<dyn Material>);
+	let material_right_rc = Rc::from(material_right as Box<dyn Material>);
+	
+	let sphere0 = Box::new(Sphere::new(&Vec3::new( 0.0f32, -100.5f32, -1.0f32), 100.0f32, &material_ground_rc));
+	let sphere1 = Box::new(Sphere::new(&Vec3::new( 0.0f32,    0.0f32, -1.0f32),   0.5f32, &material_center_rc));
+	let sphere2 = Box::new(Sphere::new(&Vec3::new(-1.0f32,    0.0f32, -1.0f32),   0.5f32, &material_left_rc));
+	let sphere3 = Box::new(Sphere::new(&Vec3::new( 1.0f32,    0.0f32, -1.0f32),   0.5f32, &material_right_rc));
 	let mut world: HittableList = HittableList::new();
 	world.m_objects.push(sphere1);
 	world.m_objects.push(sphere2);
